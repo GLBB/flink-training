@@ -19,15 +19,21 @@
 package org.apache.flink.training.exercises.hourlytips;
 
 import org.apache.flink.api.common.JobExecutionResult;
+import org.apache.flink.api.common.eventtime.SerializableTimestampAssigner;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.PrintSinkFunction;
 import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
+import org.apache.flink.streaming.api.functions.windowing.ProcessWindowFunction;
+import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
+import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.apache.flink.training.exercises.common.datatypes.TaxiFare;
 import org.apache.flink.training.exercises.common.sources.TaxiFareGenerator;
-import org.apache.flink.training.exercises.common.utils.MissingSolutionException;
+import org.apache.flink.util.Collector;
 
 /**
  * The Hourly Tips exercise from the Flink training.
@@ -73,12 +79,53 @@ public class HourlyTipsExercise {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
         // start the data generator
+        WatermarkStrategy<TaxiFare> driverFareStrategy = WatermarkStrategy.<TaxiFare>forMonotonousTimestamps()
+            .withTimestampAssigner(new SerializableTimestampAssigner<TaxiFare>() {
+                @Override
+                public long extractTimestamp(TaxiFare fare, long recordTimestamp) {
+                    return fare.getEventTimeMillis();
+                }
+            });
+
+
+        WatermarkStrategy<Tuple3<Long, Long, Float>> driverHourTipStrategy = WatermarkStrategy.<Tuple3<Long, Long, Float>>forMonotonousTimestamps()
+            .withTimestampAssigner(new SerializableTimestampAssigner<Tuple3<Long, Long, Float>>() {
+                @Override
+                public long extractTimestamp(Tuple3<Long, Long, Float> element, long recordTimestamp) {
+                    return element.f0;
+                }
+            });
+        
         DataStream<TaxiFare> fares = env.addSource(source);
+        DataStream<TaxiFare> faresWithTimestamps = fares.assignTimestampsAndWatermarks(driverFareStrategy);
 
         // replace this with your solution
-        if (true) {
-            throw new MissingSolutionException();
-        }
+        DataStream<Tuple3<Long, Long, Float>> driverHourTipStream = faresWithTimestamps.keyBy(fare -> fare.driverId)
+            .window(TumblingEventTimeWindows.of(Time.hours(1)))
+            .process(new DriverHourTipsFunction());
+        DataStream<Tuple3<Long, Long, Float>> driverHourTipStreamWithTimestamps = driverHourTipStream.assignTimestampsAndWatermarks(driverHourTipStrategy);
+        
+        
+        DataStream<Tuple3<Long, Long, Float>> hourlyMax = driverHourTipStreamWithTimestamps.keyBy(tuple3 -> tuple3.f0)
+            .window(TumblingEventTimeWindows.of(Time.hours(1)))
+            .process(new ProcessWindowFunction<Tuple3<Long, Long, Float>, Tuple3<Long, Long, Float>, Long, TimeWindow>() {
+                @Override
+                public void process(Long aLong, Context context, Iterable<Tuple3<Long, Long, Float>> elements, Collector<Tuple3<Long, Long, Float>> out) throws Exception {
+                    Tuple3<Long, Long, Float> maxTuple = null;
+                    for (Tuple3<Long, Long, Float> tuple3 : elements) {
+                        if (maxTuple == null) {
+                            maxTuple = tuple3;
+                        } else if (tuple3.f2 > maxTuple.f2) {
+                            maxTuple = tuple3;
+                        }
+                    }
+                    if (maxTuple != null) {
+                        out.collect(maxTuple);
+                    }
+                }
+            });
+        hourlyMax.addSink(sink);
+
 
         // the results should be sent to the sink that was passed in
         // (otherwise the tests won't work)
@@ -90,4 +137,5 @@ public class HourlyTipsExercise {
         // execute the pipeline and return the result
         return env.execute("Hourly Tips");
     }
+    
 }
