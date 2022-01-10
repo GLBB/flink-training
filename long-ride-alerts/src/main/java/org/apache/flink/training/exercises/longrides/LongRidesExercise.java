@@ -21,6 +21,9 @@ package org.apache.flink.training.exercises.longrides;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.JobExecutionResult;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -30,7 +33,6 @@ import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
 import org.apache.flink.training.exercises.common.datatypes.TaxiRide;
 import org.apache.flink.training.exercises.common.sources.TaxiRideGenerator;
-import org.apache.flink.training.exercises.common.utils.MissingSolutionException;
 import org.apache.flink.util.Collector;
 
 import java.time.Duration;
@@ -97,18 +99,44 @@ public class LongRidesExercise {
 
     @VisibleForTesting
     public static class AlertFunction extends KeyedProcessFunction<Long, TaxiRide, Long> {
-
+        
+        private ValueState<TaxiRide> firstArriveState;
+        
         @Override
         public void open(Configuration config) throws Exception {
-            throw new MissingSolutionException();
+            firstArriveState = getRuntimeContext()
+                .getState(new ValueStateDescriptor<TaxiRide>("first-arrive-state", Types.POJO(TaxiRide.class)));
         }
 
         @Override
         public void processElement(TaxiRide ride, Context context, Collector<Long> out)
-                throws Exception {}
+                throws Exception {
+            if (firstArriveState.value() == null) {
+                firstArriveState.update(ride);
+                if (ride.isStart) {
+                    // register timer
+                    Long timerStamp = ride.getEventTimeMillis() + 2 * 60 * 60 * 1000;
+                    context.timerService().registerEventTimeTimer(timerStamp);
+                }
+            } else {
+                TaxiRide firstArrive = firstArriveState.value();
+                long substract = Math.abs(ride.getEventTimeMillis() - firstArrive.getEventTimeMillis());
+                if (substract >= 2 * 60 * 60 * 1000) {
+                    out.collect(ride.rideId);
+                }
+                if (firstArrive.isStart) {
+                    Long timerStamp = firstArrive.getEventTimeMillis() + 2 * 60 * 60 * 1000;
+                    context.timerService().deleteEventTimeTimer(timerStamp);
+                }
+                firstArriveState.clear();
+            }
+        }
 
         @Override
         public void onTimer(long timestamp, OnTimerContext context, Collector<Long> out)
-                throws Exception {}
+                throws Exception {
+            out.collect(context.getCurrentKey());
+            firstArriveState.clear();
+        }
     }
 }
